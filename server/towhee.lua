@@ -9,6 +9,102 @@ local redis = require 'redis'
 
 
 
+function split(str, pat)
+   local t = {}  -- NOTE: use {n = 0} in Lua-5.0
+   local fpat = "(.-)" .. pat
+   local last_end = 1
+   local s, e, cap = str:find(fpat, 1)
+   while s do
+      if s ~= 1 or cap ~= "" then
+         table.insert(t,cap)
+      end
+      last_end = e+1
+      s, e, cap = str:find(fpat, last_end)
+   end
+   if last_end <= #str then
+      cap = str:sub(last_end)
+      table.insert(t, cap)
+   end
+   return t
+end
+
+
+
+
+function wrap(str, limit, indent, indent1)
+   indent = indent or ""
+   indent1 = indent1 or indent
+   limit = limit or 72
+   local here = 1-#indent1
+   local function check(sp, st, word, fi)
+      if fi - here > limit then
+         here = st - #indent
+         return "\n"..indent..word
+      end
+   end
+   return indent1..str:gsub("(%s+)()(%S+)()", check)
+end
+
+
+
+function _display_article(c, r)
+
+    local max_lines = 25
+
+    local arr = split(r, "\n")
+
+    local final_output = ""
+    local line_counter = 0
+
+    c:send(final_output .. "\n========== BEGIN ARTICLE ==========\n> ")
+
+    for i=1, #arr do
+        local new_str = wrap(arr[i], 70, "", "")
+
+        local tmp_arr = split(new_str, "\n")
+
+        if #tmp_arr == 0 then
+            final_output = final_output .. "\n"
+            line_counter = line_counter + 1
+        end
+
+        for x=1, #tmp_arr do
+            final_output = final_output .. tmp_arr[x] .. "\n"
+
+            line_counter = line_counter + 1
+            if line_counter >= max_lines then
+                c:send(final_output .. "\n========== HIT RETURN KEY TO CONTINUE ... ==========\n")
+                final_output = ""
+                line_counter = 0
+                local msg, err = c:receive()
+            end
+        end
+    end
+
+    c:send(final_output .. "\n========== END OF ARTICLE ==========\n> ")
+end
+
+
+
+
+
+function trim_spaces (str)
+    if (str == nil) then
+        return nil
+    end
+   
+    -- remove leading spaces 
+    str = string.gsub(str, "^%s+", "")
+
+    -- remove trailing spaces.
+    str = string.gsub(str, "%s+$", "")
+
+    return str
+end
+
+
+
+
 function _get_article(rc, num)
 
     local articles_hash = rc:hkeys('sora')
@@ -61,29 +157,34 @@ function _process_message(line, rc)
 
     local value = nil
 
+    local is_article = false
+
     if redis_response == true then
         if line == "statements" then
-            value = rc:hget('toledowx', 'statements')
+            value = wrap(rc:hget('toledowx', 'statements'))
         elseif line == "conditions" then
-            value = rc:hget('toledowx', 'conditions')
+            value = wrap(rc:hget('toledowx', 'conditions'))
         elseif line == "summary" then
-            value = rc:hget('toledowx', 'summary')
+            value = wrap(rc:hget('toledowx', 'summary'))
         elseif line == "forecast" then
-            value = rc:hget('toledowx', 'forecast')
+            value = wrap(rc:hget('toledowx', 'forecast'))
         elseif line == "pubdate" then
             value = rc:hget('toledowx', 'pubdate')
         elseif line == "articles" then
             value = _get_article_list(rc)
-        elseif line == "help" then
+        elseif line == "help" or line == "?" then
             value = "Valid commands:\n  statements\n  conditions\n  summary\n  forecast\n  pubdate\n  articles\n  quit\n  help"
         elseif is_numeric(line) == true then
             value = _get_article(rc, line)
+            is_article = true
+        elseif string.len(trim_spaces(line)) < 1 then
+            value = ""
         else
             value = "Invalid command given. Type help for commands."
         end
     end
 
-    return value
+    return value, is_article
 
 end
 
@@ -128,7 +229,7 @@ while 1 == running do
 
     -- wait for a connection from any client
     local client = server:accept()
-    client:send("hello, client.\n\n")
+    client:send("hello, client.\n\n> ")
 --    client:send("Menu\n")
 --    client:send("  1. weather\n")
 --    client:send("  2. articles\n")
@@ -142,19 +243,23 @@ while 1 == running do
     -- receive the line
     local msg, err = client:receive()
 
-    while not err and "quit" ~= msg do
+    while not err and "quit" ~= msg  and "stop" ~= msg do
 
         -- print(string.format("received: %s", msg))
         -- client:send(msg)
 
         local redis_client = redis.connect('127.0.0.1', 6379)
 
-        local response = _process_message(msg, redis_client)
+        local response, is_article = _process_message(msg, redis_client)
 
         if response ~= nil then
-            client:send(response .. "\n")
+            if is_article then
+                _display_article(client, response)
+            else            
+                client:send(response .. "\n\n> ")
+            end
         else
-            client:send("Unknown error occurred.\n")
+            client:send("Unknown error occurred.\n> ")
         end
 
         redis_client:quit()
@@ -165,7 +270,11 @@ while 1 == running do
     client:send("goodbye client\n")
     client:close()
 
+    if msg == "stop" then
+        stop()
+    end
 
 end
+print("ending ...")
 server:close()
 
